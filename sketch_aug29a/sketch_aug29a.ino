@@ -1,0 +1,398 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <esp_system.h>
+#include <ESP32Servo.h>
+
+// Datos de tu red WiFi
+const char* ssid = "CRISF";
+const char* password = "Cris1234";
+
+const int ledPin = 2;
+const int servoPin = 18;
+int servoAngle = 90; // posicion inicial centrada
+
+WebServer server(80);
+Servo myServo;
+
+const char PAGE_HTML[] PROGMEM = R"HTMLPAGE(
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel ESP32</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --border:         rgba(11,11,11,0.10);
+    --gridline:       #e1e0d9;
+    --seq-100:        #cde2fb;
+    --seq-500:        #256abf;
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page:#0d0d0d; --text-primary:#ffffff;
+      --text-secondary:#c3c2b7; --text-muted:#898781; --border:rgba(255,255,255,0.10);
+      --gridline:#2c2c2a; --seq-100:#184f95; --seq-500:#5598e7;
+      --good:#0ca30c; --warning:#fab219; --critical:#e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--text-primary); display:flex; justify-content:center; padding:32px 16px; }
+  .panel { width:100%; max-width:420px; display:flex; flex-direction:column; gap:16px; }
+  h1 { font-size:18px; font-weight:600; margin:0; }
+  h2 { font-size:14px; font-weight:600; margin:0 0 12px 0; }
+  .card { background: var(--surface-1); border:1px solid var(--border); border-radius:12px; padding:20px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .status-pill { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color: var(--text-secondary); }
+  .dot { width:8px; height:8px; border-radius:50%; background: var(--text-muted); flex-shrink:0; }
+  .dot.good { background: var(--good); }
+  .dot.warning { background: var(--warning); }
+  .dot.critical { background: var(--critical); }
+  .hero { font-size:48px; font-weight:700; line-height:1; margin:12px 0 4px 0; }
+  .hero-label { font-size:13px; color: var(--text-secondary); }
+  .bar-track { margin-top:16px; height:8px; border-radius:4px; background: var(--seq-100); overflow:hidden; }
+  .bar-fill { height:100%; width:0%; background: var(--seq-500); border-radius:4px; transition: width 0.4s ease; }
+  .meta { display:flex; flex-direction:column; gap:6px; margin-top:16px; font-size:13px; color: var(--text-secondary);
+    border-top:1px solid var(--gridline); padding-top:12px; }
+  .meta span.val { color: var(--text-primary); font-weight:600; }
+  .meta.first { margin-top:0; border-top:none; padding-top:0; }
+  .led-row { display:flex; align-items:center; justify-content:space-between; }
+  .led-toggle { width:52px; height:30px; border-radius:15px; background: var(--gridline); border:1px solid var(--border);
+    position:relative; padding:0; cursor:pointer; }
+  .led-toggle::after { content:""; position:absolute; top:2px; left:2px; width:24px; height:24px; border-radius:50%;
+    background: var(--surface-1); box-shadow:0 1px 2px rgba(0,0,0,0.3); transition: transform 0.2s ease; }
+  .led-toggle.on { background: var(--good); }
+  .led-toggle.on::after { transform: translateX(22px); }
+  button.action { font-family:inherit; font-size:13px; font-weight:600; border-radius:8px; border:1px solid var(--border);
+    padding:8px 14px; cursor:pointer; background: var(--seq-500); color:#ffffff; width:100%; }
+  button.action:disabled { opacity:0.5; cursor:not-allowed; }
+  .scan-list { display:flex; flex-direction:column; margin-top:12px; }
+  .scan-row { display:flex; align-items:center; justify-content:space-between; font-size:13px;
+    padding:6px 0; border-bottom:1px solid var(--gridline); }
+  .scan-row:last-child { border-bottom:none; }
+  input[type=range] { width:100%; margin-top:16px; accent-color: var(--seq-500); height:20px; }
+</style>
+</head>
+<body>
+<div class="viz-root panel">
+  <div class="row"><h1>Panel ESP32</h1>
+    <span class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">Conectando…</span></span>
+  </div>
+
+  <div class="card">
+    <span class="hero-label">Señal WiFi (RSSI)</span>
+    <div class="hero"><span id="rssiValue">—</span><span class="hero-label"> dBm</span></div>
+    <div class="bar-track"><div class="bar-fill" id="signalBar"></div></div>
+    <div class="meta">
+      <div class="row"><span>Red (SSID)</span><span class="val" id="ssidValue">—</span></div>
+      <div class="row"><span>IP local</span><span class="val" id="ipValue">—</span></div>
+      <div class="row"><span>BSSID (router)</span><span class="val" id="bssidValue">—</span></div>
+      <div class="row"><span>Canal</span><span class="val" id="channelValue">—</span></div>
+      <div class="row"><span>Gateway</span><span class="val" id="gatewayValue">—</span></div>
+      <div class="row"><span>Máscara</span><span class="val" id="subnetValue">—</span></div>
+    </div>
+  </div>
+
+  <div class="card led-row">
+    <div>
+      <div class="hero-label" style="font-weight:600; color:var(--text-primary); font-size:14px;">LED (GPIO 2)</div>
+      <div class="hero-label" id="ledStateText">apagado</div>
+    </div>
+    <button class="led-toggle" id="ledToggle"></button>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span class="hero-label" style="font-weight:600; color:var(--text-primary); font-size:14px;">Servo (GPIO 18)</span>
+      <span class="val" id="servoValue" style="font-weight:700;">90°</span>
+    </div>
+    <input type="range" min="0" max="180" value="90" id="servoSlider">
+  </div>
+
+  <div class="card">
+    <h2>Chip</h2>
+    <div class="meta first">
+      <div class="row"><span>Memoria libre</span><span class="val" id="heapValue">—</span></div>
+      <div class="row"><span>Temperatura interna</span><span class="val" id="tempValue">—</span></div>
+      <div class="row"><span>Frecuencia CPU</span><span class="val" id="cpuValue">—</span></div>
+      <div class="row"><span>Encendida hace</span><span class="val" id="uptimeValue">—</span></div>
+      <div class="row"><span>MAC</span><span class="val" id="macValue">—</span></div>
+      <div class="row"><span>Flash total</span><span class="val" id="flashValue">—</span></div>
+      <div class="row"><span>Sketch usado</span><span class="val" id="sketchValue">—</span></div>
+      <div class="row"><span>Espacio libre</span><span class="val" id="freeSketchValue">—</span></div>
+      <div class="row"><span>Último reinicio</span><span class="val" id="resetValue">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Redes cercanas</h2>
+    <button class="action" id="scanBtn">Escanear redes</button>
+    <div class="scan-list" id="scanList"></div>
+  </div>
+</div>
+<script>
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const rssiValue = document.getElementById('rssiValue');
+  const signalBar = document.getElementById('signalBar');
+  const ledToggle = document.getElementById('ledToggle');
+  const ledStateText = document.getElementById('ledStateText');
+  const scanBtn = document.getElementById('scanBtn');
+  const scanList = document.getElementById('scanList');
+  const servoSlider = document.getElementById('servoSlider');
+  const servoValue = document.getElementById('servoValue');
+  let ledState = 0;
+  let servoInitialized = false;
+  let servoDebounce = null;
+
+  function rssiToPercent(rssi) {
+    const pct = (rssi + 100) * (100 / 50);
+    return Math.max(0, Math.min(100, pct));
+  }
+  function rssiKind(rssi) {
+    if (rssi >= -60) return 'good';
+    if (rssi >= -75) return 'warning';
+    return 'critical';
+  }
+  function setStatus(kind, text) {
+    statusDot.className = 'dot' + (kind ? ' ' + kind : '');
+    statusText.textContent = text;
+  }
+  function renderLed(state) {
+    ledState = state;
+    ledToggle.classList.toggle('on', !!state);
+    ledStateText.textContent = state ? 'encendido' : 'apagado';
+  }
+  function formatBytes(b) {
+    if (b > 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB';
+    if (b > 1024) return (b / 1024).toFixed(1) + ' KB';
+    return b + ' B';
+  }
+  function formatUptime(s) {
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+    if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
+    return m + 'm ' + sec + 's';
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/status');
+      const data = await res.json();
+      if (data.connected) {
+        rssiValue.textContent = data.rssi;
+        signalBar.style.width = rssiToPercent(data.rssi) + '%';
+        document.getElementById('ssidValue').textContent = data.ssid;
+        document.getElementById('ipValue').textContent = data.ip;
+        document.getElementById('bssidValue').textContent = data.bssid;
+        document.getElementById('channelValue').textContent = data.channel;
+        document.getElementById('gatewayValue').textContent = data.gateway;
+        document.getElementById('subnetValue').textContent = data.subnet;
+        setStatus(rssiKind(data.rssi), rssiKind(data.rssi) === 'good' ? 'Señal buena' : rssiKind(data.rssi) === 'warning' ? 'Señal débil' : 'Señal muy débil');
+      } else {
+        rssiValue.textContent = '—';
+        signalBar.style.width = '0%';
+        setStatus('critical', 'ESP32 sin WiFi');
+      }
+      renderLed(data.led);
+      document.getElementById('heapValue').textContent = formatBytes(data.freeHeap);
+      document.getElementById('tempValue').textContent = data.chipTemp + ' °C';
+      document.getElementById('cpuValue').textContent = data.cpuFreq + ' MHz';
+      document.getElementById('uptimeValue').textContent = formatUptime(data.uptime);
+      document.getElementById('macValue').textContent = data.mac;
+      document.getElementById('flashValue').textContent = formatBytes(data.flashSize);
+      document.getElementById('sketchValue').textContent = formatBytes(data.sketchSize);
+      document.getElementById('freeSketchValue').textContent = formatBytes(data.freeSketchSpace);
+      document.getElementById('resetValue').textContent = data.resetReason;
+      if (!servoInitialized && typeof data.servoAngle !== 'undefined') {
+        servoSlider.value = data.servoAngle;
+        servoValue.textContent = data.servoAngle + '°';
+        servoInitialized = true;
+      }
+    } catch (e) {
+      setStatus('critical', 'Sin respuesta del ESP32');
+    }
+  }
+
+  ledToggle.addEventListener('click', async () => {
+    const next = ledState ? 0 : 1;
+    await fetch(next ? '/led/on' : '/led/off');
+    renderLed(next);
+  });
+
+  servoSlider.addEventListener('input', () => {
+    servoValue.textContent = servoSlider.value + '°';
+    clearTimeout(servoDebounce);
+    servoDebounce = setTimeout(() => {
+      fetch('/servo?angle=' + servoSlider.value);
+    }, 60);
+  });
+
+  scanBtn.addEventListener('click', async () => {
+    scanBtn.disabled = true;
+    scanBtn.textContent = 'Escaneando…';
+    scanList.innerHTML = '';
+    try {
+      const res = await fetch('/scan');
+      const nets = await res.json();
+      nets.sort((a, b) => b.rssi - a.rssi);
+      nets.forEach(n => {
+        const row = document.createElement('div');
+        row.className = 'scan-row';
+        const name = document.createElement('span');
+        name.textContent = n.ssid || '(oculta)';
+        const pill = document.createElement('span');
+        pill.className = 'status-pill';
+        const dot = document.createElement('span');
+        dot.className = 'dot ' + rssiKind(n.rssi);
+        pill.appendChild(dot);
+        pill.appendChild(document.createTextNode(n.rssi + ' dBm'));
+        row.appendChild(name);
+        row.appendChild(pill);
+        scanList.appendChild(row);
+      });
+      if (nets.length === 0) scanList.textContent = 'No se encontraron redes';
+    } catch (e) {
+      scanList.textContent = 'Error al escanear';
+    }
+    scanBtn.disabled = false;
+    scanBtn.textContent = 'Escanear redes';
+  });
+
+  poll();
+  setInterval(poll, 1000);
+</script>
+</body>
+</html>
+)HTMLPAGE";
+
+String resetReasonToString(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:   return "Power-on";
+    case ESP_RST_EXT:       return "Reset externo";
+    case ESP_RST_SW:        return "Reset por software";
+    case ESP_RST_PANIC:     return "Panic / excepcion";
+    case ESP_RST_INT_WDT:   return "Watchdog interno";
+    case ESP_RST_TASK_WDT:  return "Watchdog de tarea";
+    case ESP_RST_WDT:       return "Watchdog";
+    case ESP_RST_DEEPSLEEP: return "Salida de deep sleep";
+    case ESP_RST_BROWNOUT:  return "Brownout (voltaje bajo)";
+    case ESP_RST_SDIO:      return "Reset por SDIO";
+    default:                return "Desconocido";
+  }
+}
+
+void setServoAngle(int angle) {
+  angle = constrain(angle, 0, 180);
+  servoAngle = angle;
+  myServo.write(angle);
+}
+
+void handleRoot() {
+  server.send_P(200, "text/html", PAGE_HTML);
+}
+
+void handleStatus() {
+  String json = "{";
+  if (WiFi.status() == WL_CONNECTED) {
+    json += "\"connected\":true,";
+    json += "\"ssid\":\"" + WiFi.SSID() + "\",";
+    json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+    json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+    json += "\"bssid\":\"" + WiFi.BSSIDstr() + "\",";
+    json += "\"channel\":" + String(WiFi.channel()) + ",";
+    json += "\"gateway\":\"" + WiFi.gatewayIP().toString() + "\",";
+    json += "\"subnet\":\"" + WiFi.subnetMask().toString() + "\",";
+  } else {
+    json += "\"connected\":false,";
+  }
+  json += "\"led\":" + String(digitalRead(ledPin)) + ",";
+  json += "\"servoAngle\":" + String(servoAngle) + ",";
+  json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"chipTemp\":" + String(temperatureRead(), 1) + ",";
+  json += "\"cpuFreq\":" + String(ESP.getCpuFreqMHz()) + ",";
+  json += "\"uptime\":" + String(millis() / 1000) + ",";
+  json += "\"mac\":\"" + WiFi.macAddress() + "\",";
+  json += "\"flashSize\":" + String(ESP.getFlashChipSize()) + ",";
+  json += "\"sketchSize\":" + String(ESP.getSketchSize()) + ",";
+  json += "\"freeSketchSpace\":" + String(ESP.getFreeSketchSpace()) + ",";
+  json += "\"resetReason\":\"" + resetReasonToString(esp_reset_reason()) + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleScan() {
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+  }
+  json += "]";
+  WiFi.scanDelete();
+  server.send(200, "application/json", json);
+}
+
+void handleLedOn() {
+  digitalWrite(ledPin, HIGH);
+  server.send(200, "text/plain", "OK");
+}
+
+void handleLedOff() {
+  digitalWrite(ledPin, LOW);
+  server.send(200, "text/plain", "OK");
+}
+
+void handleServo() {
+  if (server.hasArg("angle")) {
+    setServoAngle(server.arg("angle").toInt());
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+  myServo.setPeriodHertz(50);
+  myServo.attach(servoPin, 500, 2400); // pulso min/max en microsegundos
+  setServoAngle(servoAngle);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando a WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Conectado. Abri esta IP en el navegador: http://");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/scan", handleScan);
+  server.on("/led/on", handleLedOn);
+  server.on("/led/off", handleLedOff);
+  server.on("/servo", handleServo);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
